@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Control de Baños con Excel</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    select, input, button { margin: 5px; padding: 5px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    th { background-color: #f0f0f0; }
+    .filtros { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    label { font-weight: bold; margin-right: 6px; }
+    .nula { color: #999; }
+  </style>
+</head>
+<body>
+  <h2>📋 Control de alumnos en el baño</h2>
+
+  <!-- Subir archivo Excel/CSV -->
+  <h3>📂 Cargar lista de alumnos (CSV)</h3>
+  <input type="file" id="fileInput" accept=".csv">
+
+  <!-- Buscador -->
+  <h3>🔎 Buscar alumno</h3>
+  <div class="filtros">
+    <input type="text" id="busqueda" placeholder="Escribe nombre o apellido...">
+    <div>
+      <label for="curso">Curso</label>
+      <select id="curso">
+        <option value="">--Todos los cursos--</option>
+        <option value="1ESO">1º ESO</option>
+        <option value="2ESO">2º ESO</option>
+        <option value="3ESO">3º ESO</option>
+        <option value="4ESO">4º ESO</option>
+        <option value="1BACH">1º Bachillerato</option>
+        <option value="2BACH">2º Bachillerato</option>
+      </select>
+    </div>
+    <div>
+      <label for="grupo">Grupo</label>
+      <select id="grupo" disabled>
+        <option value="">--Todos los grupos--</option>
+      </select>
+    </div>
+    <div>
+      <button id="btn-descargar">⬇️ Descargar historial CSV</button>
+    </div>
+  </div>
+
+  <!-- Resultados -->
+  <table id="tabla">
+    <thead>
+      <tr>
+        <th>Nombre</th>
+        <th>Curso</th>
+        <th>Grupo</th>
+        <th>Acción</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <!-- Tabla de registros -->
+  <h3>🕒 Registros de baño</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Fecha</th>
+        <th>Nombre</th>
+        <th>Curso</th>
+        <th>Grupo</th>
+        <th>Hora exacta</th>
+        <th>Hora lectiva</th>
+        <th>Veces hoy</th>
+      </tr>
+    </thead>
+    <tbody id="registrosBody"></tbody>
+  </table>
+
+  <script>
+    // ---------- Datos y configuración ----------
+    let alumnos = [];
+    let contadorBaños = {};
+    let fechaUltima = new Date().toDateString(); // para reinicio diario
+
+    // historial persistente en localStorage
+    let historialRegistros = JSON.parse(localStorage.getItem("historialRegistros") || "[]");
+
+    // si quieres que el CSV se descargue automáticamente al registrar, pon true (no recomendado)
+    const descargarAutomatico = false;
+
+    const gruposPorCurso = {
+      "1ESO": ["A","B","C","D","E","F","G"],
+      "2ESO": ["A","B","C","D","E","F","G"],
+      "3ESO": ["A","B","C","D","E","F"],
+      "4ESO": ["A","B","C","D","E","F"],
+      "1BACH": ["A","B","C","D"],
+      "2BACH": ["A","B","C"]
+    };
+
+    const horariosLectivos = [
+      { hora: "1ª hora", inicio: "08:00", fin: "08:55" },
+      { hora: "2ª hora", inicio: "08:55", fin: "09:50" },
+      { hora: "3ª hora", inicio: "09:50", fin: "10:45" },
+      { hora: "4ª hora", inicio: "11:15", fin: "12:10" },
+      { hora: "5ª hora", inicio: "12:10", fin: "13:05" },
+      { hora: "6ª hora", inicio: "13:05", fin: "14:00" }
+    ];
+
+    // ---------- Funciones de utilidad ----------
+    function verificarCambioDeDia() {
+      const hoy = new Date().toDateString();
+      if (hoy !== fechaUltima) {
+        contadorBaños = {};
+        fechaUltima = hoy;
+        // si quieres limpiar la vista diaria:
+        // document.getElementById("registrosBody").innerHTML = "";
+      }
+    }
+
+    function convertirHora(horaStr, referenciaDate) {
+      const [h, m] = horaStr.split(":").map(Number);
+      const d = new Date(referenciaDate);
+      d.setHours(h, m, 0, 0);
+      return d;
+    }
+
+    function fechaEnEspanolConDia(date) {
+      const opciones = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
+      const str = date.toLocaleDateString('es-ES', opciones);
+      return str.charAt(0).toUpperCase() + str.slice(1);
+    }
+
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, function(m) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];
+      });
+    }
+
+    function escapeJs(text) {
+      return String(text).replace(/'/g, "\\'");
+    }
+
+    // ---------- Persistencia y CSV ----------
+    function guardarHistorialLocal() {
+      localStorage.setItem("historialRegistros", JSON.stringify(historialRegistros));
+    }
+
+    function anadirHistorial(reg) {
+      historialRegistros.push(reg);
+      guardarHistorialLocal();
+      if (descargarAutomatico) descargarHistorialCSV();
+    }
+
+    function descargarHistorialCSV() {
+      if (historialRegistros.length === 0) {
+        alert("No hay registros para descargar.");
+        return;
+      }
+      const encabezados = ["Fecha","Nombre","Curso","Grupo","HoraExacta","HoraLectiva","VecesHoy"];
+      const filas = historialRegistros.map(r =>
+        encabezados.map(h => {
+          const v = r[h] ?? "";
+          return `"${String(v).replace(/"/g, '""')}"`;
+        }).join(",")
+      );
+      const contenido = [encabezados.join(","), ...filas].join("\n");
+      const blob = new Blob([contenido], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `historial_baños_${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    // ---------- Carga CSV de alumnos ----------
+    document.getElementById("fileInput").addEventListener("change", function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: function(results) {
+          alumnos = results.data.map(r => ({
+            Nombre: (r.Nombre || r.nombre || r.Name || r.name || "").trim(),
+            Curso: (r.Curso || r.curso || r.COURSE || "").trim(),
+            Grupo: (r.Grupo || r.grupo || r.GrupoClase || r.group || "").trim()
+          }));
+          mostrar(alumnos);
+        }
+      });
+    });
+
+    // ---------- Listeners UI ----------
+    document.getElementById("busqueda").addEventListener("input", filtrar);
+    document.getElementById("curso").addEventListener("change", function() {
+      actualizarOpcionesGrupo();
+      filtrar();
+    });
+    document.getElementById("grupo").addEventListener("change", filtrar);
+    document.getElementById("btn-descargar").addEventListener("click", descargarHistorialCSV);
+
+    // ---------- UI helpers ----------
+    function actualizarOpcionesGrupo() {
+      const curso = document.getElementById("curso").value;
+      const selectGrupo = document.getElementById("grupo");
+      selectGrupo.innerHTML = '<option value="">--Todos los grupos--</option>';
+      if (!curso || !gruposPorCurso[curso]) {
+        selectGrupo.disabled = true;
+        return;
+      }
+      gruposPorCurso[curso].forEach(g => {
+        const opt = document.createElement("option");
+        opt.value = g;
+        opt.textContent = g;
+        selectGrupo.appendChild(opt);
+      });
+      selectGrupo.disabled = false;
+    }
+
+    function filtrar() {
+      verificarCambioDeDia();
+      const texto = document.getElementById("busqueda").value.toLowerCase();
+      const curso = document.getElementById("curso").value;
+      const grupo = document.getElementById("grupo").value;
+      const filtrados = alumnos.filter(a => {
+        const nombre = (a.Nombre || "").toLowerCase();
+        return (!texto || nombre.includes(texto)) &&
+               (!curso || a.Curso === curso) &&
+               (!grupo || a.Grupo === grupo);
+      });
+      mostrar(filtrados);
+    }
+
+    function mostrar(lista) {
+      const tablaBody = document.querySelector("#tabla tbody");
+      tablaBody.innerHTML = "";
+      lista.forEach(a => {
+        const fila = document.createElement("tr");
+        fila.innerHTML = `
+          <td>${escapeHtml(a.Nombre)}</td>
+          <td>${escapeHtml(a.Curso)}</td>
+          <td>${escapeHtml(a.Grupo)}</td>
+          <td><button onclick="registrarBaño('${escapeJs(a.Nombre)}', '${escapeJs(a.Curso)}', '${escapeJs(a.Grupo)}')">🚻 Marcar baño</button></td>
+        `;
+        tablaBody.appendChild(fila);
+      });
+    }
+
+    // ---------- Registro de baño ----------
+    function registrarBaño(nombre, curso, grupo) {
+      verificarCambioDeDia();
+      const ahora = new Date();
+      const horaActual = ahora.toTimeString().slice(0,5);
+      const fechaHoyCadena = fechaEnEspanolConDia(ahora);
+
+      // determinar hora lectiva usando Date
+      let horaLectiva = "❌ Nula";
+      for (const h of horariosLectivos) {
+        const inicio = convertirHora(h.inicio, ahora);
+        const fin = convertirHora(h.fin, ahora);
+        if (ahora >= inicio && ahora < fin) {
+          horaLectiva = h.hora;
+          break;
+        }
+      }
+
+      const clave = `${nombre}-${curso}-${grupo}`;
+      if (!contadorBaños[clave]) {
+        contadorBaños[clave] = 0;
+      }
+      if (horaLectiva !== "❌ Nula") {
+        contadorBaños[clave]++;
+      }
+
+      const fila = document.createElement("tr");
+      const claseNula = horaLectiva === "❌ Nula" ? "nula" : "";
+      fila.innerHTML = `
+        <td>${escapeHtml(fechaHoyCadena)}</td>
+        <td>${escapeHtml(nombre)}</td>
+        <td>${escapeHtml(curso)}</td>
+        <td>${escapeHtml(grupo)}</td>
+        <td>${horaActual}</td>
+        <td class="${claseNula}">${horaLectiva}</td>
+        <td>${contadorBaños[clave]}</td>
+      `;
+      document.getElementById("registrosBody").appendChild(fila);
+
+      // añadir al historial persistente y guardar en localStorage
+      const registro = {
+        Fecha: fechaHoyCadena,
+        Nombre: nombre,
+        Curso: curso,
+        Grupo: grupo,
+        HoraExacta: horaActual,
+        HoraLectiva: horaLectiva,
+        VecesHoy: contadorBaños[clave] || 0
+      };
+      anadirHistorial(registro);
+    }
+
+    // Inicializar vista con historial cargado (opcional: mostrar últimos N registros)
+    (function inicializar() {
+      // si quieres rellenar la tabla de registros con historial existente, descomenta:
+      // historialRegistros.forEach(r => {
+      //   const fila = document.createElement("tr");
+      //   const claseNula = r.HoraLectiva === "❌ Nula" ? "nula" : "";
+      //   fila.innerHTML = `
+      //     <td>${escapeHtml(r.Fecha)}</td>
+      //     <td>${escapeHtml(r.Nombre)}</td>
+      //     <td>${escapeHtml(r.Curso)}</td>
+      //     <td>${escapeHtml(r.Grupo)}</td>
+      //     <td>${escapeHtml(r.HoraExacta)}</td>
+      //     <td class="${claseNula}">${escapeHtml(r.HoraLectiva)}</td>
+      //     <td>${escapeHtml(r.VecesHoy)}</td>
+      //   `;
+      //   document.getElementById("registrosBody").appendChild(fila);
+      // });
+
+      // Si prefieres restaurar contador del día actual desde historial:
+      try {
+        const hoy = new Date().toDateString();
+        historialRegistros.forEach(r => {
+          // intentar detectar fecha en r.Fecha transformable a Date
+          const parsed = new Date(r.Fecha);
+          if (!isNaN(parsed) && parsed.toDateString() === hoy) {
+            const clave = `${r.Nombre}-${r.Curso}-${r.Grupo}`;
+            contadorBaños[clave] = Math.max(contadorBaños[clave] || 0, Number(r.VecesHoy || 0));
+          }
+        });
+      } catch (e) {
+        // noop
+      }
+    })();
+  </script>
+</body>
+</html>
